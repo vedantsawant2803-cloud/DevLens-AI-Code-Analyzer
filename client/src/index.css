@@ -15,6 +15,30 @@
   --text: #c8d8f0;
 }
 
+[data-theme="light"] {
+  --bg: #f0f4fa;
+  --surface: #ffffff;
+  --border: #d0d9e8;
+  --accent: #0099b3;
+  --green: #00a86b;
+  --orange: #e68600;
+  --red: #d63050;
+  --purple: #8b5cf6;
+  --muted: #64748b;
+  --text: #1e293b;
+}
+
+[data-theme="light"] .glass {
+  background: rgba(255, 255, 255, 0.85);
+}
+
+[data-theme="light"] .font-display.text-white,
+[data-theme="light"] h1.text-white,
+[data-theme="light"] h2.text-white,
+[data-theme="light"] h3.text-white {
+  color: var(--text) !important;
+}
+
 * {
   box-sizing: border-box;
 }

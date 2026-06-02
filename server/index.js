@@ -1,34 +1,101 @@
 require("dotenv").config();
+
+const path = require("path");
 const express = require("express");
 const cors = require("cors");
+const helmet = require("helmet");
+const cookieParser = require("cookie-parser");
 const rateLimit = require("express-rate-limit");
+const { assertEnv } = require("./config/env");
+const { notFoundHandler, errorHandler } = require("./middleware/errorHandler");
 
 const analyzeRouter = require("./routes/analyze");
 const repoRouter = require("./routes/repo");
+const badgeRouter = require("./routes/badge");
+const authRouter = require("./routes/auth");
 
+const env = assertEnv();
 const app = express();
-const PORT = process.env.PORT || 5000;
 
-// Rate limiting — protect the AI endpoint from abuse
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 20,
-  message: { error: "Too many requests, please try again later." },
+if (env.isProd) {
+  app.set("trust proxy", 1);
+}
+
+app.use(helmet({
+  contentSecurityPolicy: false,
+  crossOriginEmbedderPolicy: false,
+}));
+
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin || env.clientUrls.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error("Not allowed by CORS"));
+    }
+  },
+  credentials: true,
+  allowedHeaders: ["Content-Type", "X-Github-Token"],
+}));
+
+app.use(cookieParser());
+app.use(express.json({ limit: "4mb" }));
+
+app.use((req, res, next) => {
+  req.setTimeout(120000);
+  res.setTimeout(120000);
+  next();
 });
 
-app.use(cors({ origin: process.env.CLIENT_URL || "http://localhost:5173" }));
-app.use(express.json({ limit: "2mb" }));
-app.use("/api/analyze", limiter);
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: env.isProd ? 100 : 300,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many requests. Please try again later." },
+});
 
-// Routes
-app.use("/api/analyze", analyzeRouter);
-app.use("/api/repo", repoRouter);
+const analyzeLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: env.isProd ? 15 : 40,
+  message: { error: "Analysis rate limit reached. Please wait before trying again." },
+});
 
-// Health check
+app.use("/api", apiLimiter);
+
 app.get("/api/health", (req, res) => {
-  res.json({ status: "ok", timestamp: new Date().toISOString() });
+  res.json({
+    status: "ok",
+    version: "2.1.0",
+    environment: env.isProd ? "production" : "development",
+    gemini: !!process.env.GEMINI_API_KEY,
+    github: !!(process.env.GITHUB_TOKEN || process.env.GITHUB_CLIENT_ID),
+    timestamp: new Date().toISOString(),
+  });
 });
 
-app.listen(PORT, () => {
-  console.log(`🚀 DevLens server running on http://localhost:${PORT}`);
+app.use("/api/analyze", analyzeLimiter, analyzeRouter);
+app.use("/api/repo", repoRouter);
+app.use("/api/badge", badgeRouter);
+app.use("/api/auth", authRouter);
+
+if (env.isProd) {
+  const clientDist = path.join(__dirname, "../client/dist");
+  app.use(express.static(clientDist, { maxAge: "1d", index: false }));
+  app.get("*", (req, res, next) => {
+    if (req.path.startsWith("/api")) return next();
+    res.sendFile(path.join(clientDist, "index.html"));
+  });
+}
+
+app.use(notFoundHandler);
+app.use(errorHandler);
+
+const server = app.listen(env.port, () => {
+  console.log(`🚀 DevLens server v2.1 (${env.isProd ? "production" : "development"}) on port ${env.port}`);
 });
+
+server.timeout = 120000;
+server.keepAliveTimeout = 125000;
+
+module.exports = app;

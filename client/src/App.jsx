@@ -3,6 +3,10 @@ import { AnimatePresence } from "framer-motion";
 import LandingPage from "./pages/LandingPage";
 import AnalyzePage from "./pages/AnalyzePage";
 import ResultsPage from "./pages/ResultsPage";
+import DashboardPage from "./pages/DashboardPage";
+import ComparePage from "./pages/ComparePage";
+import QueuePage from "./pages/QueuePage";
+import AuthCallbackPage from "./pages/AuthCallbackPage";
 import { AnalysisProvider } from "./context/AnalysisContext";
 
 export default function App() {
@@ -15,6 +19,10 @@ export default function App() {
           <Route path="/" element={<LandingPage />} />
           <Route path="/analyze" element={<AnalyzePage />} />
           <Route path="/results" element={<ResultsPage />} />
+          <Route path="/dashboard" element={<DashboardPage />} />
+          <Route path="/compare" element={<ComparePage />} />
+          <Route path="/queue" element={<QueuePage />} />
+          <Route path="/auth/callback" element={<AuthCallbackPage />} />
         </Routes>
       </AnimatePresence>
     </AnalysisProvider>

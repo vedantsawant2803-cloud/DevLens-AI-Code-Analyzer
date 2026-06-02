@@ -1,20 +1,36 @@
 const express = require("express");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 const router = express.Router();
+const { validateFocus, validateAnalysisPayload } = require("../utils/validate");
+const asyncHandler = require("../middleware/asyncHandler");
+const { assertEnv } = require("../config/env");
 
-// Build the analysis prompt from repo files
-function buildPrompt(files, repoName) {
+const env = assertEnv();
+
+const FOCUS_PROMPTS = {
+  fullstack: "Review as a full-stack engineer covering frontend, backend, and DevOps holistically.",
+  frontend: "Review primarily as a frontend engineer — focus on UI patterns, React/component architecture, accessibility, and client performance.",
+  backend: "Review primarily as a backend engineer — focus on API design, data flow, error handling, security, and scalability.",
+  security: "Review primarily as a security engineer — focus on vulnerabilities, auth, input validation, secrets, and OWASP risks.",
+  devops: "Review primarily as a DevOps engineer — focus on deployment, CI/CD, configuration, monitoring, and infrastructure.",
+};
+
+function buildPrompt(files, repoName, focus = "fullstack") {
   const fileSnippets = files
     .map((f) => `### File: ${f.path}\n\`\`\`\n${f.content}\n\`\`\``)
     .join("\n\n");
 
+  const focusInstruction = FOCUS_PROMPTS[focus] || FOCUS_PROMPTS.fullstack;
+
   return `You are an expert senior software engineer conducting a thorough code review of the GitHub repository "${repoName}".
+
+${focusInstruction}
 
 Analyze the following code files carefully:
 
 ${fileSnippets}
 
-Return your analysis as a single valid JSON object (no markdown, no extra text) with exactly this shape:
+Return your analysis as a single valid JSON object with exactly this shape:
 
 {
   "scores": {
@@ -26,97 +42,98 @@ Return your analysis as a single valid JSON object (no markdown, no extra text) 
   },
   "overallScore": <0-100 integer, weighted average>,
   "level": "<one of: Beginner | Intermediate | Advanced | Expert>",
-  "summary": "<2-3 sentence executive summary of the codebase>",
-  "strengths": [
-    "<specific strength 1>",
-    "<specific strength 2>",
-    "<specific strength 3>"
-  ],
+  "summary": "<2-3 sentence executive summary>",
+  "strengths": ["<strength 1>", "<strength 2>", "<strength 3>"],
   "improvements": [
     {
       "title": "<short title>",
       "description": "<what the issue is and why it matters>",
-      "before": "<actual problematic code snippet from the files, max 6 lines>",
-      "after": "<improved version of that same code snippet, max 6 lines>",
+      "file": "<file path this relates to>",
+      "before": "<actual code snippet, max 6 lines>",
+      "after": "<improved code snippet, max 6 lines>",
       "impact": "<Low | Medium | High>"
-    },
+    }
+  ],
+  "fileBreakdown": [
     {
-      "title": "<short title>",
-      "description": "<what the issue is and why it matters>",
-      "before": "<actual problematic code snippet from the files, max 6 lines>",
-      "after": "<improved version of that same code snippet, max 6 lines>",
-      "impact": "<Low | Medium | High>"
-    },
-    {
-      "title": "<short title>",
-      "description": "<what the issue is and why it matters>",
-      "before": "<actual problematic code snippet from the files, max 6 lines>",
-      "after": "<improved version of that same code snippet, max 6 lines>",
-      "impact": "<Low | Medium | High>"
+      "file": "<file path>",
+      "score": <0-100 integer>,
+      "topIssue": "<main issue in this file>",
+      "dimensions": { "cleanCode": <0-100>, "security": <0-100> }
     }
   ],
   "skillGaps": [
     {
       "skill": "<skill name>",
       "currentLevel": "<Beginner | Intermediate | Advanced>",
-      "recommendation": "<specific actionable learning recommendation>"
-    },
-    {
-      "skill": "<skill name>",
-      "currentLevel": "<Beginner | Intermediate | Advanced>",
-      "recommendation": "<specific actionable learning recommendation>"
-    },
-    {
-      "skill": "<skill name>",
-      "currentLevel": "<Beginner | Intermediate | Advanced>",
-      "recommendation": "<specific actionable learning recommendation>"
+      "recommendation": "<actionable recommendation>"
     }
   ],
-  "techStack": ["<detected technology 1>", "<detected technology 2>", "<detected technology 3>"]
+  "techStack": ["<technology 1>", "<technology 2>"],
+  "fixItPrompt": "<A detailed prompt for Cursor/Copilot to fix the top 3 issues. 3-5 sentences.>"
 }
 
-Be specific and reference actual code from the files. Be honest but constructive. Calibrate scores fairly — most repos should score 30-75 range.`;
+Include exactly 3 improvements and 3 skillGaps. Include fileBreakdown for up to 8 files. Be specific. Calibrate scores fairly — most repos score 30-75.`;
 }
 
-// POST /api/analyze  { files: [...], repoName: "..." }
-router.post("/", async (req, res) => {
-  const { files, repoName } = req.body;
+function parseJsonResponse(rawText) {
+  const cleaned = rawText.replace(/```json\s*|```/g, "").trim();
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    const start = cleaned.indexOf("{");
+    const end = cleaned.lastIndexOf("}");
+    if (start >= 0 && end > start) {
+      return JSON.parse(cleaned.slice(start, end + 1));
+    }
+    throw new Error("Invalid JSON response from AI");
+  }
+}
 
-  if (!files || !Array.isArray(files) || files.length === 0) {
-    return res.status(400).json({ error: "No files provided for analysis" });
+router.post("/", asyncHandler(async (req, res) => {
+  const { files, repoName, focus: rawFocus } = req.body;
+
+  const payloadCheck = validateAnalysisPayload(files);
+  if (!payloadCheck.valid) {
+    return res.status(400).json({ error: payloadCheck.error });
+  }
+
+  const focus = validateFocus(rawFocus);
+  if (!focus) {
+    return res.status(400).json({ error: "Invalid analysis focus mode" });
   }
 
   if (!process.env.GEMINI_API_KEY) {
-    return res.status(500).json({ error: "Gemini API key not configured on server" });
+    return res.status(503).json({ error: "AI analysis is not configured on this server" });
   }
 
-  try {
-    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-    // gemini-1.5-flash is completely free — 15 RPM, 1M tokens/day
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+  const safeRepoName = String(repoName || "repository").slice(0, 200);
+  const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+  const model = genAI.getGenerativeModel({
+    model: env.geminiModel,
+    generationConfig: { responseMimeType: "application/json" },
+  });
 
-    const prompt = buildPrompt(files, repoName || "repository");
+  const prompt = buildPrompt(payloadCheck.files, safeRepoName, focus);
+
+  for (let attempt = 0; attempt < 2; attempt++) {
     const result = await model.generateContent(prompt);
     const rawText = result.response.text();
 
-    // Strip any accidental markdown code fences before parsing
-    const cleaned = rawText.replace(/```json|```/g, "").trim();
-
-    let analysis;
     try {
-      analysis = JSON.parse(cleaned);
+      const analysis = parseJsonResponse(rawText);
+      if (!analysis.improvements) analysis.improvements = [];
+      if (!analysis.fileBreakdown) analysis.fileBreakdown = [];
+      if (!analysis.fixItPrompt) {
+        analysis.fixItPrompt = `Fix the top code quality issues in ${safeRepoName}. Focus on: ${analysis.improvements.slice(0, 3).map((i) => i.title).join(", ")}.`;
+      }
+      return res.json({ analysis, repoName: safeRepoName, focus });
     } catch {
-      console.error("Failed to parse Gemini response:", rawText);
+      if (attempt === 0) continue;
+      console.error("Failed to parse Gemini response:", rawText.slice(0, 500));
       return res.status(500).json({ error: "AI returned malformed response. Please try again." });
     }
-
-    res.json({ analysis, repoName });
-  } catch (err) {
-    console.error("Gemini API error:", err.message);
-    if (err.message?.includes("API_KEY_INVALID")) return res.status(500).json({ error: "Invalid Gemini API key" });
-    if (err.message?.includes("RESOURCE_EXHAUSTED")) return res.status(429).json({ error: "Gemini rate limit hit. Wait a moment and try again." });
-    res.status(500).json({ error: "Analysis failed. Please try again." });
   }
-});
+}));
 
 module.exports = router;

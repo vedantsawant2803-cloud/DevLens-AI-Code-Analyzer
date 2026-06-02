@@ -1,16 +1,26 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
 import { useAnalysis } from "../context/AnalysisContext";
+import AppNav from "../components/AppNav";
 import RadarChart from "../components/RadarChart";
 import ScoreCard from "../components/ScoreCard";
 import ImprovementCard from "../components/ImprovementCard";
 import SkillGapCard from "../components/SkillGapCard";
 import ShareCard from "../components/ShareCard";
-import { Terminal, ArrowLeft, Download, Share2, Github } from "lucide-react";
+import FileBreakdown from "../components/FileBreakdown";
+import FixItPrompt from "../components/FixItPrompt";
+import TechBadges from "../components/TechBadges";
+import DependencyHealth from "../components/DependencyHealth";
+import ReadmeScore from "../components/ReadmeScore";
+import CommitInsight from "../components/CommitInsight";
+import BadgePanel from "../components/BadgePanel";
+import PdfExport from "../components/PdfExport";
+import TrendChart from "../components/TrendChart";
+import { Share2, Github } from "lucide-react";
 
 export default function ResultsPage() {
-  const { analysisData, repoInfo } = useAnalysis();
+  const { analysisData, repoInfo, insights, history } = useAnalysis();
   const navigate = useNavigate();
   const [showShare, setShowShare] = useState(false);
 
@@ -20,7 +30,7 @@ export default function ResultsPage() {
 
   if (!analysisData) return null;
 
-  const { scores, overallScore, level, summary, strengths, improvements, skillGaps, techStack } = analysisData;
+  const { scores, overallScore, level, summary, strengths, improvements, skillGaps, techStack, fileBreakdown, fixItPrompt } = analysisData;
 
   const scoreColor = overallScore >= 75 ? "text-green" : overallScore >= 50 ? "text-orange" : "text-red";
   const levelColors = {
@@ -31,190 +41,137 @@ export default function ResultsPage() {
   };
 
   return (
-    <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      className="min-h-screen grid-bg"
-    >
-      {/* Ambient glow */}
-      <div className="fixed top-0 right-0 w-[500px] h-[500px] bg-accent/3 rounded-full blur-[150px] pointer-events-none" />
-      <div className="fixed bottom-0 left-0 w-[400px] h-[400px] bg-purple/3 rounded-full blur-[120px] pointer-events-none" />
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="min-h-screen grid-bg">
+      <AppNav />
 
-      {/* Nav */}
-      <nav className="sticky top-0 z-50 glass border-b border-border px-6 py-4">
-        <div className="max-w-6xl mx-auto flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <button
-              onClick={() => navigate("/")}
-              className="flex items-center gap-2 text-muted hover:text-text transition-colors text-sm font-code"
-            >
-              <ArrowLeft size={16} /> Back
-            </button>
-            <div className="w-px h-5 bg-border" />
-            <Terminal className="text-accent" size={18} />
-            <span className="font-display text-white font-bold">DevLens</span>
-          </div>
-
-          <div className="flex items-center gap-3">
+      <div className="max-w-6xl mx-auto px-6 py-8">
+        <div className="flex flex-wrap items-center justify-between gap-4 mb-8">
+          <div>
             {repoInfo && (
-              <a
-                href={repoInfo.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex items-center gap-2 text-muted hover:text-text text-sm font-code transition-colors"
-              >
-                <Github size={14} />
-                {repoInfo.owner}/{repoInfo.name}
+              <a href={repoInfo.url} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 text-muted hover:text-text text-sm font-code mb-1">
+                <Github size={14} /> {repoInfo.owner}/{repoInfo.name}
               </a>
             )}
+            <h1 className="font-display text-white text-2xl font-bold">Analysis Results</h1>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <PdfExport analysis={analysisData} repoInfo={repoInfo} insights={insights} />
             <button
               onClick={() => setShowShare(true)}
-              className="flex items-center gap-2 bg-accent text-bg font-display font-bold text-sm px-4 py-2 rounded-lg hover:bg-accentDim transition-colors"
+              className="flex items-center gap-2 bg-accent text-bg font-display font-bold text-sm px-4 py-2 rounded-lg hover:bg-accentDim"
             >
-              <Share2 size={14} /> Share
+              <Share2 size={14} /> Share PNG
             </button>
           </div>
         </div>
-      </nav>
 
-      <div className="max-w-6xl mx-auto px-6 py-10">
-        {/* Hero score section */}
-        <motion.div
-          initial={{ y: 20, opacity: 0 }}
-          animate={{ y: 0, opacity: 1 }}
-          transition={{ delay: 0.1 }}
-          className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8"
-        >
-          {/* Overall score */}
-          <div className="glass rounded-2xl p-8 flex flex-col items-center justify-center text-center col-span-1">
-            {repoInfo?.avatar && (
-              <img src={repoInfo.avatar} alt="repo owner" className="w-12 h-12 rounded-full border border-border mb-4" />
-            )}
-            <p className="text-muted text-xs font-code mb-3">OVERALL SCORE</p>
-            <div className={`font-display text-8xl font-bold ${scoreColor} mb-2`} style={{ lineHeight: 1 }}>
-              {overallScore}
-            </div>
-            <div className="text-muted text-sm font-code mb-4">/ 100</div>
-            <span className={`text-xs font-code border px-3 py-1 rounded-full ${levelColors[level] || levelColors.Intermediate}`}>
-              {level}
-            </span>
-            {techStack && techStack.length > 0 && (
+        {/* Hero */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
+          <div className="glass rounded-2xl p-8 flex flex-col items-center text-center">
+            {repoInfo?.avatar && <img src={repoInfo.avatar} alt="" className="w-12 h-12 rounded-full border border-border mb-4" />}
+            <p className="text-muted text-xs font-code mb-2">OVERALL SCORE</p>
+            <div className={`font-display text-8xl font-bold ${scoreColor}`} style={{ lineHeight: 1 }}>{overallScore}</div>
+            <span className={`text-xs font-code border px-3 py-1 rounded-full mt-3 ${levelColors[level] || levelColors.Intermediate}`}>{level}</span>
+            {techStack?.length > 0 && (
               <div className="mt-4 flex flex-wrap gap-1 justify-center">
                 {techStack.map((t) => (
-                  <span key={t} className="text-xs font-code bg-surface border border-border text-muted px-2 py-0.5 rounded">
-                    {t}
-                  </span>
+                  <span key={t} className="text-xs font-code bg-surface border border-border text-muted px-2 py-0.5 rounded">{t}</span>
                 ))}
               </div>
             )}
           </div>
 
-          {/* Summary + strengths */}
           <div className="lg:col-span-2 space-y-4">
             <div className="glass rounded-2xl p-6">
-              <p className="text-muted text-xs font-code mb-2 uppercase tracking-widest">AI Summary</p>
+              <p className="text-muted text-xs font-code mb-2 uppercase">AI Summary</p>
               <p className="text-text leading-relaxed">{summary}</p>
             </div>
             <div className="glass rounded-2xl p-6">
-              <p className="text-muted text-xs font-code mb-3 uppercase tracking-widest">Strengths</p>
+              <p className="text-muted text-xs font-code mb-3 uppercase">Strengths</p>
               <ul className="space-y-2">
                 {strengths.map((s, i) => (
-                  <li key={i} className="flex items-start gap-2 text-sm">
-                    <span className="text-green mt-0.5">✓</span>
-                    <span className="text-text">{s}</span>
-                  </li>
+                  <li key={i} className="flex items-start gap-2 text-sm"><span className="text-green">✓</span><span>{s}</span></li>
                 ))}
               </ul>
             </div>
           </div>
-        </motion.div>
+        </div>
 
-        {/* Score breakdown + Radar */}
-        <motion.div
-          initial={{ y: 20, opacity: 0 }}
-          animate={{ y: 0, opacity: 1 }}
-          transition={{ delay: 0.2 }}
-          className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8"
-        >
-          {/* Score bars */}
+        {/* Insights row */}
+        {insights && (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+            <div className="glass rounded-2xl p-5"><ReadmeScore data={insights.readmeScore} /></div>
+            <div className="glass rounded-2xl p-5"><CommitInsight data={insights.commitActivity} /></div>
+            <div className="glass rounded-2xl p-5 lg:col-span-2"><TechBadges badges={insights.techBadges} /></div>
+          </div>
+        )}
+
+        {/* Scores + Radar + Trend */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
           <div className="glass rounded-2xl p-6">
-            <p className="text-muted text-xs font-code mb-5 uppercase tracking-widest">Score Breakdown</p>
+            <p className="text-muted text-xs font-code mb-4 uppercase">Score Breakdown</p>
             <div className="space-y-4">
               {Object.entries(scores).map(([key, val], i) => (
                 <ScoreCard key={key} label={key} value={val} index={i} />
               ))}
             </div>
           </div>
-
-          {/* Radar chart */}
           <div className="glass rounded-2xl p-6 flex flex-col">
-            <p className="text-muted text-xs font-code mb-4 uppercase tracking-widest">Skill Radar</p>
-            <div className="flex-1 flex items-center justify-center">
-              <RadarChart scores={scores} />
+            <p className="text-muted text-xs font-code mb-4 uppercase">Skill Radar</p>
+            <div className="flex-1 flex items-center justify-center"><RadarChart scores={scores} /></div>
+          </div>
+          <div className="glass rounded-2xl p-6">
+            <p className="text-muted text-xs font-code mb-4 uppercase">Score Trend</p>
+            <TrendChart history={history} repoUrl={repoInfo?.url} />
+          </div>
+        </div>
+
+        {/* File breakdown */}
+        {fileBreakdown?.length > 0 && (
+          <div className="mb-8">
+            <p className="text-muted text-xs font-code mb-4 uppercase">File-Level Breakdown</p>
+            <FileBreakdown files={fileBreakdown} />
+          </div>
+        )}
+
+        {/* Fix-it prompt */}
+        <div className="mb-8"><FixItPrompt prompt={fixItPrompt} /></div>
+
+        {/* Dependencies */}
+        {insights?.dependencies && (
+          <div className="glass rounded-2xl p-6 mb-8">
+            <p className="text-muted text-xs font-code mb-4 uppercase">Dependency Health</p>
+            <DependencyHealth data={insights.dependencies} />
+          </div>
+        )}
+
+        {/* Improvements */}
+        <div className="mb-8">
+          <p className="text-muted text-xs font-code mb-4 uppercase">Code Improvements</p>
+          <div className="space-y-4">
+            {improvements.map((item, i) => <ImprovementCard key={i} item={item} index={i} />)}
+          </div>
+        </div>
+
+        {/* Skill gaps + Badge */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
+          <div className="lg:col-span-2">
+            <p className="text-muted text-xs font-code mb-4 uppercase">Skill Gap Roadmap</p>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              {skillGaps.map((gap, i) => <SkillGapCard key={i} gap={gap} index={i} />)}
             </div>
           </div>
-        </motion.div>
+          <BadgePanel owner={repoInfo?.owner} repo={repoInfo?.name} score={overallScore} />
+        </div>
 
-        {/* Code improvements */}
-        <motion.div
-          initial={{ y: 20, opacity: 0 }}
-          animate={{ y: 0, opacity: 1 }}
-          transition={{ delay: 0.3 }}
-          className="mb-8"
-        >
-          <p className="text-muted text-xs font-code mb-4 uppercase tracking-widest">Code Improvements</p>
-          <div className="space-y-4">
-            {improvements.map((item, i) => (
-              <ImprovementCard key={i} item={item} index={i} />
-            ))}
-          </div>
-        </motion.div>
-
-        {/* Skill gaps */}
-        <motion.div
-          initial={{ y: 20, opacity: 0 }}
-          animate={{ y: 0, opacity: 1 }}
-          transition={{ delay: 0.4 }}
-          className="mb-8"
-        >
-          <p className="text-muted text-xs font-code mb-4 uppercase tracking-widest">Skill Gap Roadmap</p>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {skillGaps.map((gap, i) => (
-              <SkillGapCard key={i} gap={gap} index={i} />
-            ))}
-          </div>
-        </motion.div>
-
-        {/* CTA */}
-        <motion.div
-          initial={{ y: 20, opacity: 0 }}
-          animate={{ y: 0, opacity: 1 }}
-          transition={{ delay: 0.5 }}
-          className="glass rounded-2xl p-8 text-center"
-        >
-          <p className="text-muted text-xs font-code mb-2">READY TO LEVEL UP?</p>
-          <h3 className="font-display text-white text-2xl font-bold mb-3">
-            Analyze another repository
-          </h3>
-          <p className="text-muted text-sm mb-6">Track your progress over time by analyzing your repos regularly.</p>
-          <button
-            onClick={() => navigate("/")}
-            className="bg-accent text-bg font-display font-bold px-8 py-3 rounded-lg hover:bg-accentDim transition-colors"
-          >
-            Analyze New Repo
+        <div className="glass rounded-2xl p-8 text-center">
+          <button onClick={() => navigate("/")} className="bg-accent text-bg font-display font-bold px-8 py-3 rounded-lg hover:bg-accentDim">
+            Analyze Another Repo
           </button>
-        </motion.div>
+        </div>
       </div>
 
-      {/* Share modal */}
-      {showShare && (
-        <ShareCard
-          analysis={analysisData}
-          repoInfo={repoInfo}
-          onClose={() => setShowShare(false)}
-        />
-      )}
+      {showShare && <ShareCard analysis={analysisData} repoInfo={repoInfo} onClose={() => setShowShare(false)} />}
     </motion.div>
   );
 }
