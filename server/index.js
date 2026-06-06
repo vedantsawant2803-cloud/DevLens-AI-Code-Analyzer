@@ -28,11 +28,22 @@ app.use(helmet({
 
 app.use(cors({
   origin: (origin, callback) => {
-    if (!origin || env.clientUrls.includes(origin)) {
-      callback(null, true);
-    } else {
-      callback(new Error("Not allowed by CORS"));
+    if (!origin) {
+      return callback(null, true);
     }
+    if (env.clientUrls.includes(origin)) {
+      return callback(null, true);
+    }
+    if (!env.isProd) {
+      const isLocalhost = origin.startsWith("http://localhost:") || 
+                          origin.startsWith("http://127.0.0.1:") || 
+                          origin === "http://localhost" || 
+                          origin === "http://127.0.0.1";
+      if (isLocalhost) {
+        return callback(null, true);
+      }
+    }
+    callback(new Error("Not allowed by CORS"));
   },
   credentials: true,
   allowedHeaders: ["Content-Type", "X-Github-Token"],

@@ -109,31 +109,62 @@ router.post("/", asyncHandler(async (req, res) => {
 
   const safeRepoName = String(repoName || "repository").slice(0, 200);
   const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-  const model = genAI.getGenerativeModel({
-    model: env.geminiModel,
-    generationConfig: { responseMimeType: "application/json" },
-  });
-
   const prompt = buildPrompt(payloadCheck.files, safeRepoName, focus);
 
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const result = await model.generateContent(prompt);
-    const rawText = result.response.text();
+  const modelsToTry = [
+    env.geminiModel,
+    "gemini-2.0-flash",
+    "gemini-flash-latest"
+  ].filter((v, i, a) => a.indexOf(v) === i); // Deduplicate
 
+  let lastError = null;
+
+  for (const modelName of modelsToTry) {
+    console.log(`[analyze] Attempting analysis with model: ${modelName}`);
     try {
-      const analysis = parseJsonResponse(rawText);
-      if (!analysis.improvements) analysis.improvements = [];
-      if (!analysis.fileBreakdown) analysis.fileBreakdown = [];
-      if (!analysis.fixItPrompt) {
-        analysis.fixItPrompt = `Fix the top code quality issues in ${safeRepoName}. Focus on: ${analysis.improvements.slice(0, 3).map((i) => i.title).join(", ")}.`;
+      const model = genAI.getGenerativeModel({
+        model: modelName,
+        generationConfig: { responseMimeType: "application/json" },
+      });
+
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const result = await model.generateContent(prompt);
+          const rawText = result.response.text();
+          const analysis = parseJsonResponse(rawText);
+          
+          if (!analysis.improvements) analysis.improvements = [];
+          if (!analysis.fileBreakdown) analysis.fileBreakdown = [];
+          if (!analysis.fixItPrompt) {
+            analysis.fixItPrompt = `Fix the top code quality issues in ${safeRepoName}. Focus on: ${analysis.improvements.slice(0, 3).map((i) => i.title).join(", ")}.`;
+          }
+          return res.json({ analysis, repoName: safeRepoName, focus });
+        } catch (err) {
+          lastError = err;
+          console.warn(`[analyze] Model ${modelName} (attempt ${attempt + 1}) failed: ${err.message}`);
+          
+          const isNetworkOrRateLimit = err.message && (
+            err.message.includes("503") || 
+            err.message.includes("429") || 
+            err.message.includes("Service Unavailable") ||
+            err.message.includes("resource exhausted")
+          );
+          
+          if (isNetworkOrRateLimit) {
+            break; // break the attempt loop to try the next model
+          }
+        }
       }
-      return res.json({ analysis, repoName: safeRepoName, focus });
-    } catch {
-      if (attempt === 0) continue;
-      console.error("Failed to parse Gemini response:", rawText.slice(0, 500));
-      return res.status(500).json({ error: "AI returned malformed response. Please try again." });
+    } catch (err) {
+      lastError = err;
+      console.warn(`[analyze] Failed to initialize model ${modelName}: ${err.message}`);
     }
   }
+
+  console.error("[analyze] All models failed. Last error:", lastError);
+  return res.status(500).json({ 
+    error: `AI analysis failed. ${lastError ? lastError.message : "Please try again."}` 
+  });
 }));
 
 module.exports = router;
