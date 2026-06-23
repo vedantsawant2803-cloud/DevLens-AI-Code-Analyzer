@@ -1,11 +1,28 @@
 const express = require("express");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
+const crypto = require("crypto");
 const router = express.Router();
 const { validateFocus, validateAnalysisPayload } = require("../utils/validate");
 const asyncHandler = require("../middleware/asyncHandler");
 const { assertEnv } = require("../config/env");
 
 const env = assertEnv();
+
+const analysisCache = new Map();
+const CACHE_MAX_ENTRIES = 100;
+const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+function hashInput(files, focus) {
+  const hash = crypto.createHash("sha256");
+  const sortedFiles = [...files].sort((a, b) => a.path.localeCompare(b.path));
+  for (const file of sortedFiles) {
+    hash.update(file.path);
+    hash.update(file.content || "");
+  }
+  hash.update(focus);
+  return hash.digest("hex");
+}
+
 
 const FOCUS_PROMPTS = {
   fullstack: "Review as a full-stack engineer covering frontend, backend, and DevOps holistically.",
@@ -108,6 +125,15 @@ router.post("/", asyncHandler(async (req, res) => {
   }
 
   const safeRepoName = String(repoName || "repository").slice(0, 200);
+
+  // Check in-memory cache first to avoid score fluctuations and redundant API calls
+  const inputHash = hashInput(payloadCheck.files, focus);
+  const cachedResult = analysisCache.get(inputHash);
+  if (cachedResult && (Date.now() - cachedResult.timestamp < CACHE_TTL_MS)) {
+    console.log(`[analyze] Serving cached analysis for ${safeRepoName} (${focus})`);
+    return res.json(cachedResult.data);
+  }
+
   const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
   const prompt = buildPrompt(payloadCheck.files, safeRepoName, focus);
 
@@ -124,7 +150,10 @@ router.post("/", asyncHandler(async (req, res) => {
     try {
       const model = genAI.getGenerativeModel({
         model: modelName,
-        generationConfig: { responseMimeType: "application/json" },
+        generationConfig: { 
+          responseMimeType: "application/json",
+          temperature: 0.1
+        },
       });
 
       for (let attempt = 0; attempt < 2; attempt++) {
@@ -138,7 +167,20 @@ router.post("/", asyncHandler(async (req, res) => {
           if (!analysis.fixItPrompt) {
             analysis.fixItPrompt = `Fix the top code quality issues in ${safeRepoName}. Focus on: ${analysis.improvements.slice(0, 3).map((i) => i.title).join(", ")}.`;
           }
-          return res.json({ analysis, repoName: safeRepoName, focus });
+
+          const responseData = { analysis, repoName: safeRepoName, focus };
+
+          // Cache the successful result before returning
+          if (analysisCache.size >= CACHE_MAX_ENTRIES) {
+            const oldestKey = analysisCache.keys().next().value;
+            analysisCache.delete(oldestKey);
+          }
+          analysisCache.set(inputHash, {
+            data: responseData,
+            timestamp: Date.now()
+          });
+
+          return res.json(responseData);
         } catch (err) {
           lastError = err;
           console.warn(`[analyze] Model ${modelName} (attempt ${attempt + 1}) failed: ${err.message}`);
