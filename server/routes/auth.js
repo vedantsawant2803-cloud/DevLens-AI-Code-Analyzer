@@ -30,7 +30,7 @@ function cookieOptions() {
   return {
     httpOnly: true,
     secure: env.isProd,
-    sameSite: "lax",
+    sameSite: env.isProd ? "none" : "lax",
     path: "/",
     maxAge: 7 * 24 * 60 * 60 * 1000,
   };
@@ -49,8 +49,8 @@ function setAuthCookies(res, token, user) {
 }
 
 function clearAuthCookies(res) {
-  res.clearCookie("github_token", { path: "/" });
-  res.clearCookie("github_user", { path: "/" });
+  res.clearCookie("github_token", cookieOptions());
+  res.clearCookie("github_user", cookieOptions());
 }
 
 // GET /api/auth/github

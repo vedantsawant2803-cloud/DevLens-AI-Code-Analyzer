@@ -1,11 +1,12 @@
 const API_TIMEOUT_MS = 120000;
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 
 export async function apiFetch(path, options = {}) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
 
   try {
-    const res = await fetch(path, {
+    const res = await fetch(`${API_BASE}${path}`, {
       ...options,
       credentials: "include",
       signal: controller.signal,
