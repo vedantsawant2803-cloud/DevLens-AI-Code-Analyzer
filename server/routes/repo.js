@@ -9,6 +9,7 @@ const {
 const { validateGitHubUrl } = require("../utils/validate");
 const asyncHandler = require("../middleware/asyncHandler");
 const getGitHubToken = require("../middleware/getToken");
+const { debugLog } = require("../utils/debugLog");
 
 const router = express.Router();
 
@@ -54,6 +55,11 @@ router.post("/files", asyncHandler(async (req, res) => {
   const result = parseAndValidateUrl(url);
   if (result.error) return res.status(400).json({ error: result.error });
 
+  const filesStart = Date.now();
+  // #region agent log
+  debugLog("repo.js:/files", "files request", { url: result.normalized, owner: result.parsed.owner, repo: result.parsed.repo }, "B");
+  // #endregion
+
   const { files, branch } = await fetchRepoFiles(result.parsed.owner, result.parsed.repo, {
     ref: result.parsed.ref,
     prNumber: result.parsed.prNumber,
@@ -61,10 +67,17 @@ router.post("/files", asyncHandler(async (req, res) => {
   });
 
   if (!files.length) {
+    // #region agent log
+    debugLog("repo.js:/files", "no files found", { url: result.normalized, elapsedMs: Date.now() - filesStart }, "C");
+    // #endregion
     return res.status(422).json({
       error: "No supported code files found. Use a public repo with .js, .ts, .py, or similar files, or connect GitHub for private repos.",
     });
   }
+
+  // #region agent log
+  debugLog("repo.js:/files", "files success", { fileCount: files.length, branch, elapsedMs: Date.now() - filesStart }, "B");
+  // #endregion
 
   res.json({
     files,

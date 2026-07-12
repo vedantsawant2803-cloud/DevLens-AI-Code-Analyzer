@@ -7,6 +7,7 @@ const asyncHandler = require("../middleware/asyncHandler");
 const { assertEnv } = require("../config/env");
 
 const env = assertEnv();
+const { debugLog } = require("../utils/debugLog");
 
 const analysisCache = new Map();
 const CACHE_MAX_ENTRIES = 100;
@@ -184,6 +185,14 @@ router.post("/", asyncHandler(async (req, res) => {
   const { files, repoName, focus: rawFocus } = req.body;
 
   const payloadCheck = validateAnalysisPayload(files);
+  // #region agent log
+  debugLog("analyze.js:POST", "payload validation", {
+    fileCount: files?.length,
+    valid: payloadCheck.valid,
+    error: payloadCheck.error || null,
+    totalChars: Array.isArray(files) ? files.reduce((s, f) => s + String(f.content || "").length, 0) : 0,
+  }, "D");
+  // #endregion
   if (!payloadCheck.valid) {
     return res.status(400).json({ error: payloadCheck.error });
   }
@@ -314,6 +323,14 @@ router.post("/", asyncHandler(async (req, res) => {
   }
 
   console.error("[analyze] All models failed. Last error:", lastError?.message);
+
+  // #region agent log
+  debugLog("analyze.js:POST", "all models failed", {
+    repoName: safeRepoName,
+    promptChars: prompt.length,
+    lastError: lastError?.message || "unknown",
+  }, "E");
+  // #endregion
 
   const errorMsg = lastError?.message || "AI analysis failed";
   const isTimeout = errorMsg.includes("timed out");

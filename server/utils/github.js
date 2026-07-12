@@ -1,5 +1,6 @@
 const axios = require("axios");
 const { isValidSlug } = require("./validate");
+const { debugLog } = require("./debugLog");
 
 const CODE_EXTENSIONS = [
   ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
@@ -121,8 +122,13 @@ async function fetchPRFiles(owner, repo, prNumber, headers) {
 }
 
 async function fetchRepoFiles(owner, repo, options = {}) {
+  const fetchStart = Date.now();
   const { ref, userToken, prNumber } = options;
   const headers = getGitHubHeaders(userToken);
+
+  // #region agent log
+  debugLog("github.js:fetchRepoFiles", "fetch started", { owner, repo, ref, prNumber }, "A");
+  // #endregion
 
   if (prNumber) {
     const files = await fetchPRFiles(owner, repo, prNumber, headers);
@@ -157,10 +163,20 @@ async function fetchRepoFiles(owner, repo, options = {}) {
     treeSha = commitData.tree.sha;
   }
 
+  const treeStart = Date.now();
   const { data: treeData } = await axios.get(
     `https://api.github.com/repos/${owner}/${repo}/git/trees/${treeSha}?recursive=1`,
     { headers, timeout: GITHUB_TIMEOUT_MS }
   );
+
+  // #region agent log
+  debugLog("github.js:tree", "tree fetched", {
+    owner, repo,
+    treeEntries: (treeData.tree || []).length,
+    truncated: !!treeData.truncated,
+    treeMs: Date.now() - treeStart,
+  }, "A");
+  // #endregion
 
   const candidates = (treeData.tree || [])
     .filter(
@@ -180,6 +196,16 @@ async function fetchRepoFiles(owner, repo, options = {}) {
     const content = await fetchRawFile(owner, repo, item.path, branch, headers);
     return { path: item.path, content, size: item.size || content.length };
   });
+
+  // #region agent log
+  debugLog("github.js:fetchRepoFiles", "fetch complete", {
+    owner, repo,
+    candidates: candidates.length,
+    filesFetched: files.length,
+    totalMs: Date.now() - fetchStart,
+    samplePaths: files.slice(0, 3).map((f) => f.path),
+  }, "B");
+  // #endregion
 
   return { files, branch, defaultBranch: repoData.default_branch };
 }
