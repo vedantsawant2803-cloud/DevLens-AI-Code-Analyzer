@@ -9,11 +9,14 @@ const CODE_EXTENSIONS = [
 
 const SKIP_DIRS = new Set([
   "node_modules", ".git", "dist", "build", ".next", "vendor", "coverage",
-  "__pycache__", ".venv", "target", "bin", "obj",
+  "__pycache__", ".venv", "target", "bin", "obj", ".cache", "out",
 ]);
 
-const MAX_FILES = 25;
-const MAX_FILE_CHARS = 3000;
+// Reduced limits to keep prompts small and responses fast
+const MAX_FILES = 15;
+const MAX_FILE_CHARS = 2000;
+const FILE_FETCH_CONCURRENCY = 5; // fetch files in parallel batches
+const GITHUB_TIMEOUT_MS = 20000; // 20s per GitHub API call
 
 function parseGitHubUrl(url) {
   try {
@@ -72,24 +75,44 @@ function isCodeFile(filePath) {
 async function fetchRawFile(owner, repo, path, ref, headers) {
   const encodedPath = path.split("/").map(encodeURIComponent).join("/");
   const url = `https://raw.githubusercontent.com/${owner}/${repo}/${ref}/${encodedPath}`;
-  const { data } = await axios.get(url, { headers, responseType: "text", timeout: 15000 });
+  const { data } = await axios.get(url, {
+    headers,
+    responseType: "text",
+    timeout: GITHUB_TIMEOUT_MS,
+  });
   return String(data).slice(0, MAX_FILE_CHARS);
+}
+
+/**
+ * Fetch an array of items in parallel with a concurrency limit.
+ */
+async function fetchWithConcurrency(items, fetchFn, concurrency = FILE_FETCH_CONCURRENCY) {
+  const results = [];
+  for (let i = 0; i < items.length; i += concurrency) {
+    const batch = items.slice(i, i + concurrency);
+    const batchResults = await Promise.allSettled(batch.map(fetchFn));
+    for (const r of batchResults) {
+      if (r.status === "fulfilled" && r.value != null) {
+        results.push(r.value);
+      }
+    }
+  }
+  return results;
 }
 
 async function fetchPRFiles(owner, repo, prNumber, headers) {
   const { data: prFiles } = await axios.get(
     `https://api.github.com/repos/${owner}/${repo}/pulls/${prNumber}/files`,
-    { headers }
+    { headers, timeout: GITHUB_TIMEOUT_MS }
   );
 
   const files = [];
   for (const item of prFiles) {
     if (files.length >= MAX_FILES) break;
     if (item.status === "removed" || !isCodeFile(item.filename)) continue;
-
     files.push({
       path: item.filename,
-      content: (item.patch || item.contents_url || "").slice(0, MAX_FILE_CHARS),
+      content: (item.patch || "").slice(0, MAX_FILE_CHARS),
       size: item.changes,
       source: "pull_request",
     });
@@ -106,35 +129,37 @@ async function fetchRepoFiles(owner, repo, options = {}) {
     return { files, branch: `pr-${prNumber}`, defaultBranch: null };
   }
 
+  // Fetch repo metadata (needed for default branch)
   const { data: repoData } = await axios.get(
     `https://api.github.com/repos/${owner}/${repo}`,
-    { headers }
+    { headers, timeout: GITHUB_TIMEOUT_MS }
   );
 
   const branch = ref || repoData.default_branch;
 
+  // Get tree SHA, try branch endpoint first then git ref as fallback
   let treeSha;
   try {
     const { data: branchData } = await axios.get(
       `https://api.github.com/repos/${owner}/${repo}/branches/${encodeURIComponent(branch)}`,
-      { headers }
+      { headers, timeout: GITHUB_TIMEOUT_MS }
     );
     treeSha = branchData.commit.commit.tree.sha;
   } catch {
     const { data: refData } = await axios.get(
       `https://api.github.com/repos/${owner}/${repo}/git/ref/heads/${encodeURIComponent(branch)}`,
-      { headers }
+      { headers, timeout: GITHUB_TIMEOUT_MS }
     );
     const { data: commitData } = await axios.get(
       `https://api.github.com/repos/${owner}/${repo}/git/commits/${refData.object.sha}`,
-      { headers }
+      { headers, timeout: GITHUB_TIMEOUT_MS }
     );
     treeSha = commitData.tree.sha;
   }
 
   const { data: treeData } = await axios.get(
     `https://api.github.com/repos/${owner}/${repo}/git/trees/${treeSha}?recursive=1`,
-    { headers }
+    { headers, timeout: GITHUB_TIMEOUT_MS }
   );
 
   const candidates = (treeData.tree || [])
@@ -144,19 +169,17 @@ async function fetchRepoFiles(owner, repo, options = {}) {
         isCodeFile(item.path) &&
         !shouldSkipPath(item.path) &&
         !item.path.includes("package-lock.json") &&
-        !item.path.includes("yarn.lock")
+        !item.path.includes("yarn.lock") &&
+        !item.path.includes(".min.") &&
+        (item.size || 0) < 100000 // skip binary/huge files
     )
     .slice(0, MAX_FILES);
 
-  const files = [];
-  for (const item of candidates) {
-    try {
-      const content = await fetchRawFile(owner, repo, item.path, branch, headers);
-      files.push({ path: item.path, content, size: item.size || content.length });
-    } catch {
-      // skip unreadable files
-    }
-  }
+  // Fetch files in parallel batches for speed
+  const files = await fetchWithConcurrency(candidates, async (item) => {
+    const content = await fetchRawFile(owner, repo, item.path, branch, headers);
+    return { path: item.path, content, size: item.size || content.length };
+  });
 
   return { files, branch, defaultBranch: repoData.default_branch };
 }
@@ -164,10 +187,12 @@ async function fetchRepoFiles(owner, repo, options = {}) {
 async function fetchRepoInsights(owner, repo, options = {}) {
   const headers = getGitHubHeaders(options.userToken);
 
-  const [repoRes, commitsRes, readmeRes] = await Promise.allSettled([
-    axios.get(`https://api.github.com/repos/${owner}/${repo}`, { headers }),
-    axios.get(`https://api.github.com/repos/${owner}/${repo}/commits?per_page=5`, { headers }),
-    axios.get(`https://api.github.com/repos/${owner}/${repo}/readme`, { headers }),
+  // Run all insight fetches in parallel
+  const [repoRes, commitsRes, readmeRes, packageRes] = await Promise.allSettled([
+    axios.get(`https://api.github.com/repos/${owner}/${repo}`, { headers, timeout: GITHUB_TIMEOUT_MS }),
+    axios.get(`https://api.github.com/repos/${owner}/${repo}/commits?per_page=5`, { headers, timeout: GITHUB_TIMEOUT_MS }),
+    axios.get(`https://api.github.com/repos/${owner}/${repo}/readme`, { headers, timeout: GITHUB_TIMEOUT_MS }),
+    fetchPackageJson(owner, repo, headers),
   ]);
 
   const repoData = repoRes.status === "fulfilled" ? repoRes.value.data : null;
@@ -176,7 +201,11 @@ async function fetchRepoInsights(owner, repo, options = {}) {
 
   if (readmeRes.status === "fulfilled") {
     const encoded = readmeRes.value.data.content?.replace(/\n/g, "") || "";
-    readmeContent = Buffer.from(encoded, "base64").toString("utf-8");
+    try {
+      readmeContent = Buffer.from(encoded, "base64").toString("utf-8");
+    } catch {
+      readmeContent = "";
+    }
   }
 
   const lastPush = repoData?.pushed_at ? new Date(repoData.pushed_at) : null;
@@ -201,9 +230,79 @@ async function fetchRepoInsights(owner, repo, options = {}) {
 
   const readmeScore = scoreReadme(readmeContent);
   const techBadges = detectTechBadges(repoData, readmeContent);
-  const dependencies = await scanDependencies(owner, repo, headers);
+  const dependencies = packageRes.status === "fulfilled" ? packageRes.value : { manifest: null, count: 0, dependencies: [], notes: "No dependency manifest detected" };
 
   return { commitActivity, readmeScore, techBadges, dependencies };
+}
+
+/**
+ * Fetch and parse package.json without an extra repo-info call.
+ */
+async function fetchPackageJson(owner, repo, headers) {
+  // Try to get default branch first, then fallback to common branch names
+  const branchesToTry = ["main", "master", "develop"];
+
+  for (const branch of branchesToTry) {
+    try {
+      const url = `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/package.json`;
+      const { data: content } = await axios.get(url, {
+        headers,
+        responseType: "text",
+        timeout: GITHUB_TIMEOUT_MS,
+      });
+
+      let pkg;
+      try { pkg = JSON.parse(content); } catch { continue; }
+
+      const deps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
+      const depList = Object.entries(deps).slice(0, 20).map(([name, version]) => ({
+        name,
+        version: String(version).replace(/^[\^~]/, ""),
+        type: "npm",
+        status: String(version).includes("latest") || version === "*" ? "risky" : "ok",
+      }));
+
+      return {
+        manifest: "package.json",
+        type: "npm",
+        count: Object.keys(deps).length,
+        dependencies: depList,
+        hasLockFile: true,
+        notes: depList.some((d) => d.status === "risky")
+          ? "Some dependencies use open-ended version ranges"
+          : "Dependency versions look pinned",
+      };
+    } catch {
+      // try next branch
+    }
+  }
+
+  // Try requirements.txt
+  for (const branch of branchesToTry) {
+    try {
+      const url = `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/requirements.txt`;
+      const { data: content } = await axios.get(url, {
+        headers,
+        responseType: "text",
+        timeout: GITHUB_TIMEOUT_MS,
+      });
+      const lines = content.split("\n").filter((l) => l.trim() && !l.startsWith("#"));
+      return {
+        manifest: "requirements.txt",
+        type: "pip",
+        count: lines.length,
+        dependencies: lines.slice(0, 15).map((line) => {
+          const [name, version] = line.split(/[=<>]/);
+          return { name: name?.trim(), version: version?.trim() || "any", type: "pip", status: "ok" };
+        }),
+        notes: "Review versions against PyPI for security advisories",
+      };
+    } catch {
+      // not found
+    }
+  }
+
+  return { manifest: null, count: 0, dependencies: [], notes: "No dependency manifest detected" };
 }
 
 function scoreReadme(content) {
@@ -254,73 +353,6 @@ function detectTechBadges(repoData, readme) {
       icon,
       maturity: repoData?.stargazers_count > 100 ? "established" : "emerging",
     }));
-}
-
-async function scanDependencies(owner, repo, headers) {
-  const manifests = [
-    { file: "package.json", type: "npm" },
-    { file: "requirements.txt", type: "pip" },
-    { file: "pyproject.toml", type: "pip" },
-  ];
-
-  const results = [];
-
-  for (const manifest of manifests) {
-    try {
-      const { data: repoData } = await axios.get(
-        `https://api.github.com/repos/${owner}/${repo}`,
-        { headers }
-      );
-      const branch = repoData.default_branch;
-      const content = await fetchRawFile(owner, repo, manifest.file, branch, headers);
-
-      if (manifest.type === "npm") {
-        let pkg;
-        try {
-          pkg = JSON.parse(content);
-        } catch {
-          continue;
-        }
-        const deps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
-        const depList = Object.entries(deps).slice(0, 20).map(([name, version]) => ({
-          name,
-          version: version.replace(/^[\^~]/, ""),
-          type: "npm",
-          status: version.includes("latest") || version === "*" ? "risky" : "ok",
-        }));
-        results.push({
-          manifest: manifest.file,
-          type: "npm",
-          count: Object.keys(deps).length,
-          dependencies: depList,
-          hasLockFile: true,
-          notes: depList.filter((d) => d.status === "risky").length
-            ? "Some dependencies use open-ended version ranges"
-            : "Dependency versions look pinned",
-        });
-      } else if (manifest.type === "pip") {
-        const lines = content.split("\n").filter((l) => l.trim() && !l.startsWith("#"));
-        results.push({
-          manifest: manifest.file,
-          type: "pip",
-          count: lines.length,
-          dependencies: lines.slice(0, 15).map((line) => {
-            const [name, version] = line.split(/[=<>]/);
-            return { name: name?.trim(), version: version?.trim() || "any", type: "pip", status: "ok" };
-          }),
-          notes: "Review versions against PyPI for security advisories",
-        });
-      }
-      break;
-    } catch {
-      // try next manifest
-    }
-  }
-
-  if (!results.length) {
-    return { manifest: null, count: 0, dependencies: [], notes: "No dependency manifest detected" };
-  }
-  return results[0];
 }
 
 module.exports = {

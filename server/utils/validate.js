@@ -1,10 +1,11 @@
+const MAX_FILES_PER_ANALYSIS = 15;
+const MAX_FILE_CONTENT = 2000;
+const MAX_TOTAL_PROMPT_CHARS = 80000;
+
 const GITHUB_HOST = "github.com";
 const SLUG_REGEX = /^[a-zA-Z0-9._-]{1,100}$/;
 const MAX_URL_LENGTH = 500;
 const VALID_FOCUS = new Set(["fullstack", "frontend", "backend", "security", "devops"]);
-const MAX_FILES_PER_ANALYSIS = 25;
-const MAX_FILE_CONTENT = 3000;
-const MAX_TOTAL_PROMPT_CHARS = 120000;
 
 function isValidSlug(slug) {
   return typeof slug === "string" && slug.length >= 1 && slug.length <= 100 && SLUG_REGEX.test(slug);
@@ -68,11 +69,11 @@ function validateAnalysisPayload(files) {
     if (content.length > MAX_FILE_CONTENT) {
       file.content = content.slice(0, MAX_FILE_CONTENT);
     }
-    totalChars += content.length;
+    totalChars += (file.content || "").length;
   }
 
   if (totalChars > MAX_TOTAL_PROMPT_CHARS) {
-    return { valid: false, error: "Total code size exceeds analysis limit" };
+    return { valid: false, error: "Total code size exceeds analysis limit. Try a smaller repository." };
   }
 
   return { valid: true, files };

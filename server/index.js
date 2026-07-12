@@ -28,20 +28,15 @@ app.use(helmet({
 
 app.use(cors({
   origin: (origin, callback) => {
-    if (!origin) {
-      return callback(null, true);
-    }
-    if (env.clientUrls.includes(origin)) {
-      return callback(null, true);
-    }
+    if (!origin) return callback(null, true);
+    if (env.clientUrls.includes(origin)) return callback(null, true);
     if (!env.isProd) {
-      const isLocalhost = origin.startsWith("http://localhost:") || 
-                          origin.startsWith("http://127.0.0.1:") || 
-                          origin === "http://localhost" || 
-                          origin === "http://127.0.0.1";
-      if (isLocalhost) {
-        return callback(null, true);
-      }
+      const isLocalhost =
+        origin.startsWith("http://localhost:") ||
+        origin.startsWith("http://127.0.0.1:") ||
+        origin === "http://localhost" ||
+        origin === "http://127.0.0.1";
+      if (isLocalhost) return callback(null, true);
     }
     callback(new Error("Not allowed by CORS"));
   },
@@ -52,32 +47,39 @@ app.use(cors({
 app.use(cookieParser());
 app.use(express.json({ limit: "4mb" }));
 
+// Set generous timeouts — must be larger than AI_CALL_TIMEOUT_MS in analyze.js (85s)
 app.use((req, res, next) => {
-  req.setTimeout(120000);
-  res.setTimeout(120000);
+  req.setTimeout(180000); // 3 minutes
+  res.setTimeout(180000);
   next();
 });
 
+// Global rate limiter
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: env.isProd ? 100 : 300,
+  max: env.isProd ? 120 : 500,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: "Too many requests. Please try again later." },
+  skip: (req) => req.path === "/api/health",
 });
 
+// Tighter limiter just for the expensive analyze endpoint
 const analyzeLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: env.isProd ? 15 : 40,
+  max: env.isProd ? 20 : 60,
+  standardHeaders: true,
+  legacyHeaders: false,
   message: { error: "Analysis rate limit reached. Please wait before trying again." },
 });
 
 app.use("/api", apiLimiter);
 
+// Health check — fast, always 200
 app.get("/api/health", (req, res) => {
   res.json({
     status: "ok",
-    version: "2.1.0",
+    version: "2.2.0",
     environment: env.isProd ? "production" : "development",
     gemini: !!process.env.GEMINI_API_KEY,
     github: !!(process.env.GITHUB_TOKEN || process.env.GITHUB_CLIENT_ID),
@@ -102,11 +104,17 @@ if (env.isProd) {
 app.use(notFoundHandler);
 app.use(errorHandler);
 
-const server = app.listen(env.port, () => {
-  console.log(`🚀 DevLens server v2.1 (${env.isProd ? "production" : "development"}) on port ${env.port}`);
+const PORT = env.port;
+const server = app.listen(PORT, () => {
+  console.log(`🚀 DevLens server v2.2 (${env.isProd ? "production" : "development"}) on port ${PORT}`);
+  if (env.warnings.length) {
+    env.warnings.forEach((w) => console.warn(`  ⚠  ${w}`));
+  }
 });
 
-server.timeout = 120000;
-server.keepAliveTimeout = 125000;
+// Server-level timeout — must exceed the per-request timeout + buffer
+server.timeout = 180000;          // 3 minutes
+server.keepAliveTimeout = 185000; // slightly longer than timeout
+server.headersTimeout = 190000;   // slightly longer than keepAlive
 
 module.exports = app;

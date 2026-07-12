@@ -12,6 +12,10 @@ const analysisCache = new Map();
 const CACHE_MAX_ENTRIES = 100;
 const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 
+// Generous timeout for AI generation — must be less than server/nginx timeout
+const AI_CALL_TIMEOUT_MS = 85000; // 85 seconds
+const RETRY_DELAYS_MS = [0, 3000]; // first attempt immediate, retry after 3s
+
 function hashInput(files, focus) {
   const hash = crypto.createHash("sha256");
   const sortedFiles = [...files].sort((a, b) => a.path.localeCompare(b.path));
@@ -23,7 +27,6 @@ function hashInput(files, focus) {
   return hash.digest("hex");
 }
 
-
 const FOCUS_PROMPTS = {
   fullstack: "Review as a full-stack engineer covering frontend, backend, and DevOps holistically.",
   frontend: "Review primarily as a frontend engineer — focus on UI patterns, React/component architecture, accessibility, and client performance.",
@@ -33,21 +36,26 @@ const FOCUS_PROMPTS = {
 };
 
 function buildPrompt(files, repoName, focus = "fullstack") {
-  const fileSnippets = files
-    .map((f) => `### File: ${f.path}\n\`\`\`\n${f.content}\n\`\`\``)
+  // Limit each file to 1500 chars and total files to 12 for fast AI response
+  const MAX_FILES_IN_PROMPT = 12;
+  const MAX_CHARS_PER_FILE = 1500;
+
+  const selectedFiles = files.slice(0, MAX_FILES_IN_PROMPT);
+  const fileSnippets = selectedFiles
+    .map((f) => `### File: ${f.path}\n\`\`\`\n${String(f.content || "").slice(0, MAX_CHARS_PER_FILE)}\n\`\`\``)
     .join("\n\n");
 
   const focusInstruction = FOCUS_PROMPTS[focus] || FOCUS_PROMPTS.fullstack;
 
-  return `You are an expert senior software engineer conducting a thorough code review of the GitHub repository "${repoName}".
+  return `You are a senior software engineer reviewing the GitHub repository "${repoName}".
 
 ${focusInstruction}
 
-Analyze the following code files carefully:
+Analyze these ${selectedFiles.length} code files:
 
 ${fileSnippets}
 
-Return your analysis as a single valid JSON object with exactly this shape:
+Return ONLY a valid JSON object (no markdown, no explanation) with this exact shape:
 
 {
   "scores": {
@@ -58,16 +66,16 @@ Return your analysis as a single valid JSON object with exactly this shape:
     "documentation": <0-100 integer>
   },
   "overallScore": <0-100 integer, weighted average>,
-  "level": "<one of: Beginner | Intermediate | Advanced | Expert>",
+  "level": "<Beginner | Intermediate | Advanced | Expert>",
   "summary": "<2-3 sentence executive summary>",
   "strengths": ["<strength 1>", "<strength 2>", "<strength 3>"],
   "improvements": [
     {
       "title": "<short title>",
       "description": "<what the issue is and why it matters>",
-      "file": "<file path this relates to>",
-      "before": "<actual code snippet, max 6 lines>",
-      "after": "<improved code snippet, max 6 lines>",
+      "file": "<file path>",
+      "before": "<actual code snippet, max 4 lines>",
+      "after": "<improved code snippet, max 4 lines>",
       "impact": "<Low | Medium | High>"
     }
   ],
@@ -87,24 +95,82 @@ Return your analysis as a single valid JSON object with exactly this shape:
     }
   ],
   "techStack": ["<technology 1>", "<technology 2>"],
-  "fixItPrompt": "<A detailed prompt for Cursor/Copilot to fix the top 3 issues. 3-5 sentences.>"
+  "fixItPrompt": "<A concise prompt for Cursor/Copilot to fix the top 3 issues. 2-3 sentences.>"
 }
 
-Include exactly 3 improvements and 3 skillGaps. Include fileBreakdown for up to 8 files. Be specific. Calibrate scores fairly — most repos score 30-75.`;
+Rules: exactly 3 improvements, exactly 3 skillGaps, fileBreakdown for up to 6 files. Be specific. Most repos score 30-75.`;
 }
 
 function parseJsonResponse(rawText) {
-  const cleaned = rawText.replace(/```json\s*|```/g, "").trim();
+  if (!rawText) throw new Error("Empty AI response");
+
+  // Step 1: Strip thinking tags (gemini-2.5-flash includes <think>...</think>)
+  let cleaned = rawText
+    .replace(/<think>[\s\S]*?<\/think>/gi, "")
+    .replace(/<thinking>[\s\S]*?<\/thinking>/gi, "")
+    .trim();
+
+  // Step 2: Strip markdown code fences
+  cleaned = cleaned
+    .replace(/```json\s*/gi, "")
+    .replace(/```\s*/g, "")
+    .trim();
+
+  // Step 3: Try direct parse
   try {
     return JSON.parse(cleaned);
-  } catch {
-    const start = cleaned.indexOf("{");
-    const end = cleaned.lastIndexOf("}");
-    if (start >= 0 && end > start) {
-      return JSON.parse(cleaned.slice(start, end + 1));
+  } catch { /* continue */ }
+
+  // Step 4: Extract first complete JSON object (handles surrounding prose)
+  const start = cleaned.indexOf("{");
+  if (start >= 0) {
+    // Find the matching closing brace
+    let depth = 0;
+    let end = -1;
+    for (let i = start; i < cleaned.length; i++) {
+      if (cleaned[i] === "{") depth++;
+      else if (cleaned[i] === "}") {
+        depth--;
+        if (depth === 0) { end = i; break; }
+      }
     }
-    throw new Error("Invalid JSON response from AI");
+    if (end > start) {
+      const slice = cleaned.slice(start, end + 1);
+      try {
+        return JSON.parse(slice);
+      } catch { /* continue */ }
+
+      // Step 5: Try fixing common AI JSON mistakes
+      const fixed = slice
+        .replace(/,\s*}/g, "}")
+        .replace(/,\s*]/g, "]")
+        .replace(/([\u0000-\u001F\u007F])/g, " ") // strip control chars
+        .replace(/\/\/.*/g, "");                    // strip JS comments
+      try {
+        return JSON.parse(fixed);
+      } catch { /* continue */ }
+    }
   }
+
+  throw new Error("Could not extract valid JSON from AI response");
+}
+
+/**
+ * Wraps a promise with a timeout. Rejects if the promise doesn't resolve
+ * within timeoutMs milliseconds.
+ */
+function withTimeout(promise, timeoutMs, label = "operation") {
+  let timer;
+  const timeoutPromise = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${timeoutMs / 1000}s`));
+    }, timeoutMs);
+  });
+  return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timer));
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 router.post("/", asyncHandler(async (req, res) => {
@@ -126,87 +192,132 @@ router.post("/", asyncHandler(async (req, res) => {
 
   const safeRepoName = String(repoName || "repository").slice(0, 200);
 
-  // Check in-memory cache first to avoid score fluctuations and redundant API calls
+  // Serve from in-memory cache to avoid redundant API calls and score drift
   const inputHash = hashInput(payloadCheck.files, focus);
   const cachedResult = analysisCache.get(inputHash);
   if (cachedResult && (Date.now() - cachedResult.timestamp < CACHE_TTL_MS)) {
-    console.log(`[analyze] Serving cached analysis for ${safeRepoName} (${focus})`);
+    console.log(`[analyze] Cache hit for ${safeRepoName} (${focus})`);
     return res.json(cachedResult.data);
   }
 
   const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
   const prompt = buildPrompt(payloadCheck.files, safeRepoName, focus);
+  console.log(`[analyze] Prompt chars: ${prompt.length} | Repo: ${safeRepoName} | Focus: ${focus}`);
 
+  // Model priority: fast → reliable → ultrafast fallback.
+  // All models verified available via ListModels API for this key.
   const modelsToTry = [
-    env.geminiModel,
+    env.geminiModel || "gemini-2.5-flash",
+    "gemini-2.5-flash",
     "gemini-2.0-flash",
-    "gemini-flash-latest"
-  ].filter((v, i, a) => a.indexOf(v) === i); // Deduplicate
+    "gemini-2.0-flash-lite",
+  ].filter((v, i, a) => a.indexOf(v) === i); // deduplicate
 
   let lastError = null;
 
   for (const modelName of modelsToTry) {
-    console.log(`[analyze] Attempting analysis with model: ${modelName}`);
+    console.log(`[analyze] Trying model: ${modelName}`);
+    let model;
     try {
-      const model = genAI.getGenerativeModel({
+      // Do NOT use responseMimeType — it breaks gemini-2.5-flash (thinking model)
+      // whose thinking tokens interfere with strict JSON mode.
+      // We parse JSON ourselves from the text response.
+      model = genAI.getGenerativeModel({
         model: modelName,
-        generationConfig: { 
-          responseMimeType: "application/json",
-          temperature: 0.1
+        generationConfig: {
+          temperature: 0.1,
+          maxOutputTokens: 8192, // Must be large enough for full JSON analysis response
         },
       });
-
-      for (let attempt = 0; attempt < 2; attempt++) {
-        try {
-          const result = await model.generateContent(prompt);
-          const rawText = result.response.text();
-          const analysis = parseJsonResponse(rawText);
-          
-          if (!analysis.improvements) analysis.improvements = [];
-          if (!analysis.fileBreakdown) analysis.fileBreakdown = [];
-          if (!analysis.fixItPrompt) {
-            analysis.fixItPrompt = `Fix the top code quality issues in ${safeRepoName}. Focus on: ${analysis.improvements.slice(0, 3).map((i) => i.title).join(", ")}.`;
-          }
-
-          const responseData = { analysis, repoName: safeRepoName, focus };
-
-          // Cache the successful result before returning
-          if (analysisCache.size >= CACHE_MAX_ENTRIES) {
-            const oldestKey = analysisCache.keys().next().value;
-            analysisCache.delete(oldestKey);
-          }
-          analysisCache.set(inputHash, {
-            data: responseData,
-            timestamp: Date.now()
-          });
-
-          return res.json(responseData);
-        } catch (err) {
-          lastError = err;
-          console.warn(`[analyze] Model ${modelName} (attempt ${attempt + 1}) failed: ${err.message}`);
-          
-          const isNetworkOrRateLimit = err.message && (
-            err.message.includes("503") || 
-            err.message.includes("429") || 
-            err.message.includes("Service Unavailable") ||
-            err.message.includes("resource exhausted")
-          );
-          
-          if (isNetworkOrRateLimit) {
-            break; // break the attempt loop to try the next model
-          }
-        }
-      }
     } catch (err) {
       lastError = err;
       console.warn(`[analyze] Failed to initialize model ${modelName}: ${err.message}`);
+      continue;
+    }
+
+    for (let attempt = 0; attempt < RETRY_DELAYS_MS.length; attempt++) {
+      if (attempt > 0) {
+        await delay(RETRY_DELAYS_MS[attempt]);
+      }
+      try {
+        console.log(`[analyze] ${modelName} attempt ${attempt + 1}/${RETRY_DELAYS_MS.length}`);
+
+        // Wrap the AI call with a hard timeout to prevent hanging
+        const result = await withTimeout(
+          model.generateContent(prompt),
+          AI_CALL_TIMEOUT_MS,
+          `Gemini ${modelName}`
+        );
+
+        const rawText = result.response.text();
+        if (!rawText || rawText.trim().length < 50) {
+          throw new Error("Empty or too-short AI response");
+        }
+
+        const analysis = parseJsonResponse(rawText);
+
+        // Validate required fields
+        if (!analysis.scores || typeof analysis.overallScore !== "number") {
+          throw new Error("AI response missing required fields (scores/overallScore)");
+        }
+
+        // Ensure optional arrays exist
+        if (!Array.isArray(analysis.improvements)) analysis.improvements = [];
+        if (!Array.isArray(analysis.fileBreakdown)) analysis.fileBreakdown = [];
+        if (!Array.isArray(analysis.skillGaps)) analysis.skillGaps = [];
+        if (!Array.isArray(analysis.strengths)) analysis.strengths = [];
+        if (!analysis.fixItPrompt) {
+          analysis.fixItPrompt = `Fix the top issues in ${safeRepoName}: ${analysis.improvements.slice(0, 3).map((i) => i.title).join(", ")}.`;
+        }
+
+        const responseData = { analysis, repoName: safeRepoName, focus };
+
+        // Store in cache (evict oldest entry if full)
+        if (analysisCache.size >= CACHE_MAX_ENTRIES) {
+          const oldestKey = analysisCache.keys().next().value;
+          analysisCache.delete(oldestKey);
+        }
+        analysisCache.set(inputHash, { data: responseData, timestamp: Date.now() });
+
+        console.log(`[analyze] Success: ${modelName} | score=${analysis.overallScore}`);
+        return res.json(responseData);
+
+      } catch (err) {
+        lastError = err;
+        const msg = err.message || "";
+        console.warn(`[analyze] ${modelName} attempt ${attempt + 1} failed: ${msg}`);
+
+        // On timeout or rate limit, skip retries for this model and try the next one
+        const shouldSkipRetry =
+          msg.includes("timed out") ||
+          msg.includes("503") ||
+          msg.includes("429") ||
+          msg.includes("quota") ||
+          msg.includes("rate") ||
+          msg.includes("RESOURCE_EXHAUSTED") ||
+          msg.includes("Service Unavailable");
+
+        if (shouldSkipRetry) {
+          console.warn(`[analyze] Skipping retries for ${modelName} due to: ${msg}`);
+          break;
+        }
+      }
     }
   }
 
-  console.error("[analyze] All models failed. Last error:", lastError);
-  return res.status(500).json({ 
-    error: `AI analysis failed. ${lastError ? lastError.message : "Please try again."}` 
-  });
+  console.error("[analyze] All models failed. Last error:", lastError?.message);
+
+  const errorMsg = lastError?.message || "AI analysis failed";
+  const isTimeout = errorMsg.includes("timed out");
+  const is429 = errorMsg.includes("429") || errorMsg.includes("quota") || errorMsg.includes("RESOURCE_EXHAUSTED");
+
+  const friendlyMsg = isTimeout
+    ? "Analysis timed out — the repository may be too large. Try a smaller or more focused repo."
+    : is429
+    ? "Gemini API quota exceeded. Please wait a moment and try again."
+    : `AI analysis failed: ${errorMsg}`;
+
+  return res.status(504).json({ error: friendlyMsg });
 }));
 
 module.exports = router;
