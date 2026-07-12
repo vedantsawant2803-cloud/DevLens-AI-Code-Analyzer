@@ -12,9 +12,9 @@ const analysisCache = new Map();
 const CACHE_MAX_ENTRIES = 100;
 const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 
-// Generous timeout for AI generation — must be less than server/nginx timeout
-const AI_CALL_TIMEOUT_MS = 85000; // 85 seconds
-const RETRY_DELAYS_MS = [0, 3000]; // first attempt immediate, retry after 3s
+// Timeout for a single AI call. Must be well under server.timeout (180s).
+const AI_CALL_TIMEOUT_MS = 120000; // 2 minutes
+const RETRY_DELAYS_MS = [0, 2000]; // immediate, then retry after 2s
 
 function hashInput(files, focus) {
   const hash = crypto.createHash("sha256");
@@ -36,11 +36,18 @@ const FOCUS_PROMPTS = {
 };
 
 function buildPrompt(files, repoName, focus = "fullstack") {
-  // Limit each file to 1500 chars and total files to 12 for fast AI response
-  const MAX_FILES_IN_PROMPT = 12;
-  const MAX_CHARS_PER_FILE = 1500;
+  // Keep prompt small: 8 files × 800 chars = ~6KB max, ensuring fast AI responses
+  const MAX_FILES_IN_PROMPT = 8;
+  const MAX_CHARS_PER_FILE = 800;
 
-  const selectedFiles = files.slice(0, MAX_FILES_IN_PROMPT);
+  // Prefer shorter, more important files (sort by path depth then size)
+  const selectedFiles = [...files]
+    .sort((a, b) => {
+      const depthA = (a.path.match(/\//g) || []).length;
+      const depthB = (b.path.match(/\//g) || []).length;
+      return depthA - depthB || (a.size || 0) - (b.size || 0);
+    })
+    .slice(0, MAX_FILES_IN_PROMPT);
   const fileSnippets = selectedFiles
     .map((f) => `### File: ${f.path}\n\`\`\`\n${String(f.content || "").slice(0, MAX_CHARS_PER_FILE)}\n\`\`\``)
     .join("\n\n");
@@ -204,13 +211,14 @@ router.post("/", asyncHandler(async (req, res) => {
   const prompt = buildPrompt(payloadCheck.files, safeRepoName, focus);
   console.log(`[analyze] Prompt chars: ${prompt.length} | Repo: ${safeRepoName} | Focus: ${focus}`);
 
-  // Model priority: fast → reliable → ultrafast fallback.
-  // All models verified available via ListModels API for this key.
+  // Model priority confirmed by live API testing against this key:
+  // gemini-flash-lite-latest: fastest (0.8s simple call), low quota usage
+  // gemini-2.5-flash: capable fallback (1.8s simple call)
+  // Do NOT use: gemini-2.5-flash-lite (404), gemini-2.0-flash* (quota exhausted)
   const modelsToTry = [
-    env.geminiModel || "gemini-2.5-flash",
+    env.geminiModel || "gemini-flash-lite-latest",
+    "gemini-flash-lite-latest",
     "gemini-2.5-flash",
-    "gemini-2.0-flash",
-    "gemini-2.0-flash-lite",
   ].filter((v, i, a) => a.indexOf(v) === i); // deduplicate
 
   let lastError = null;
